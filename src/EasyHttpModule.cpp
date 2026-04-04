@@ -30,7 +30,7 @@ void EasyHttpModule::ServerDeactivate()
     ResetMainAndRemoveUsersQueues();
 }
 
-RequestId EasyHttpModule::SendRequest(RequestMethod method, const std::string& url, OptionsId options_id, const ModuleRequestCallback& callback)
+RequestId EasyHttpModule::SendRequest(RequestMethod method, const std::string& url, OptionsId options_id, const ModuleRequestCallback& callback, std::shared_ptr<std::vector<cell>> user_data)
 {
     if (options_id == OptionsId::Null)
         options_id = CreateOptions();
@@ -51,9 +51,11 @@ RequestId EasyHttpModule::SendRequest(RequestMethod method, const std::string& u
     };
     request.request_control = easy_http->SendRequest(method, url, options.options_builder.BuildOptions(), cb_proxy);
     request.options_id = options_id;
+    request.user_data = user_data;
 
     return request_id;
 }
+
 
 bool EasyHttpModule::DeleteRequest(RequestId handle, bool delete_related_options)
 {

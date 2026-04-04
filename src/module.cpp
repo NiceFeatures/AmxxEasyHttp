@@ -3,6 +3,8 @@
 #include <fstream>
 #include <filesystem>
 #include <system_error>
+#include <memory>
+
 
 #include <sdk/amxxmodule.h>
 
@@ -281,13 +283,13 @@ cell AMX_NATIVE_CALL ezhttp_option_set_user_data(AMX* amx, cell* params)
     if (!ValidateOptionsId(amx, options_id))
         return 0;
 
-    std::vector<cell> user_data;
-    user_data.resize(data_len);
-    MF_CopyAmxMemory(user_data.data(), data_addr, data_len);
+    auto user_data = std::make_shared<std::vector<cell>>(data_len);
+    MF_CopyAmxMemory(user_data->data(), data_addr, data_len);
 
     g_EasyHttpModule->GetOptions(options_id).user_data = user_data;
     return 0;
 }
+
 
 // native ezhttp_option_set_plugin_end_behaviour(EzHttpOptions:options_id, EzHttpPluginEndBehaviour:plugin_end_behaviour);
 cell AMX_NATIVE_CALL ezhttp_option_set_plugin_end_behaviour(AMX* amx, cell* params)
@@ -855,17 +857,16 @@ cell AMX_NATIVE_CALL ezhttp_get_user_data(AMX* amx, cell* params)
     if (!ValidateRequestId(amx, request_id))
         return 0;
 
-    OptionsId options_id = g_EasyHttpModule->GetRequest(request_id).options_id;
-    OptionsData options = g_EasyHttpModule->GetOptions(options_id);
+    std::shared_ptr<std::vector<cell>> user_data = g_EasyHttpModule->GetRequest(request_id).user_data;
 
-    const std::optional<std::vector<cell>>& user_data = options.user_data;
     if (!user_data)
         return 0;
 
-    MF_CopyAmxMemory(data_addr, user_data.value().data(), user_data.value().size());
+    MF_CopyAmxMemory(data_addr, user_data->data(), user_data->size());
 
     return 0;
 }
+
 
 cell AMX_NATIVE_CALL ezhttp_ftp_upload(AMX* amx, cell* params)
 {
@@ -1154,10 +1155,19 @@ RequestId SendRequest(AMX* amx, RequestMethod method, OptionsId options_id, cons
         g_EasyHttpModule->DeleteRequest(request_id, true);
     };
 
-    RequestId request_id = g_EasyHttpModule->SendRequest(method, url, options_id, on_complete);
+    if (!user_data)
+    {
+        if (options_id == OptionsId::Null)
+            options_id = g_EasyHttpModule->CreateOptions();
+
+        user_data = g_EasyHttpModule->GetOptions(options_id).user_data;
+    }
+
+    RequestId request_id = g_EasyHttpModule->SendRequest(method, url, options_id, on_complete, user_data);
 
     return request_id;
 }
+
 
 bool ValidateOptionsId(AMX* amx, OptionsId options_id)
 {

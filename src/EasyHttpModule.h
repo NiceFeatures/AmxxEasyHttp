@@ -6,6 +6,8 @@
 #include "sdk/amxxmodule.h"
 #include <async++.h>
 #include <vector>
+#include <memory>
+#include <optional>
 
 enum class PluginEndBehaviour
 {
@@ -21,10 +23,11 @@ struct OptionsData
 {
     ezhttp::EasyHttpOptionsBuilder options_builder;
 
-    std::optional<std::vector<cell>> user_data;
+    std::shared_ptr<std::vector<cell>> user_data;
     PluginEndBehaviour plugin_end_behaviour = PluginEndBehaviour::CancelRequests;
     QueueId queue_id = QueueId::Main;
 };
+
 
 
 struct RequestData
@@ -33,7 +36,9 @@ struct RequestData
     // options_id is always valid as long as the RequestId associated with the object exists
     OptionsId options_id;
     ezhttp::Response response;
+    std::shared_ptr<std::vector<cell>> user_data;
 };
+
 
 struct EasyHttpPack
 {
@@ -79,7 +84,7 @@ public:
     void RunFrame();
     void ServerDeactivate();
 
-    RequestId SendRequest(ezhttp::RequestMethod method, const std::string& url, OptionsId options_id, const ModuleRequestCallback& callback);
+    RequestId SendRequest(ezhttp::RequestMethod method, const std::string& url, OptionsId options_id, const ModuleRequestCallback& callback, std::shared_ptr<std::vector<cell>> user_data = nullptr);
 
     // When using delete_related_options, make sure that other requests do not use the same options as this one
     bool DeleteRequest(RequestId handle, bool delete_related_options = false);
