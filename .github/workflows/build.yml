@@ -1,0 +1,108 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-22.04
+    container:
+      image: ubuntu:20.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install git and dependencies
+        run: |
+          apt-get update
+          apt-get install -y \
+            software-properties-common \
+            git \
+            build-essential \
+            pkg-config \
+            python3-pip
+          pip3 install cmake
+          dpkg --add-architecture i386
+          apt-get update
+          apt-get install -y \
+            gcc-multilib \
+            g++-multilib \
+            libcurl4-openssl-dev:i386 \
+            libssl-dev:i386 \
+            zlib1g-dev:i386
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure CMake
+        run: |
+          mkdir build && cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DAMXX_EASY_HTTP_BUILD_TESTS=OFF
+
+      - name: Build
+        run: |
+          cd build
+          make easy_http -j$(nproc)
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: easy_http_linux
+          path: out/bin/Release/*.so
+
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure CMake
+        run: |
+          mkdir build
+          cd build
+          cmake .. -A Win32 -DAMXX_EASY_HTTP_BUILD_TESTS=OFF
+
+      - name: Build
+        run: |
+          cd build
+          cmake --build . --config Release --target easy_http
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: easy_http_windows
+          path: out/bin/**/*.dll
+
+  create-release:
+    needs: [build-linux, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package Release
+        run: |
+          mkdir release
+          find artifacts/ -name "*.so" -exec cp {} release/ \;
+          find artifacts/ -name "*.dll" -exec cp {} release/ \;
+          ls -lR release/
+
+      - name: Create Draft Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: release/*

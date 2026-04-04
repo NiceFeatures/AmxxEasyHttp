@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <utility>
 #include <fstream>
+#include <filesystem>
+#include <system_error>
 
 #include <sdk/amxxmodule.h>
 
@@ -18,7 +20,100 @@ bool ValidateRequestId(AMX* amx, RequestId request_id);
 bool ValidateQueueId(AMX* amx, QueueId queue_id);
 template <class TMethod> void SetKeyValueOption(AMX* amx, cell* params, TMethod method);
 template <class TMethod> void SetStringOption(AMX* amx, cell* params, TMethod method);
-RequestId SendRequest(AMX* amx, RequestMethod method, OptionsId options_id, const std::string& url, const std::string& callback, cell* data = nullptr, int data_len = 0);
+
+// Safe path validation with try/catch to prevent HLDS crashes from filesystem exceptions
+bool ValidatePath(const char* native_name, const char* file_path, std::string& resolved_path_out)
+{
+    try
+    {
+        std::error_code ec;
+        std::filesystem::path base_path = std::filesystem::weakly_canonical(MF_BuildPathname("."), ec);
+        if (ec)
+        {
+            MF_Log("%s: Failed to resolve base path: %s", native_name, ec.message().c_str());
+            return false;
+        }
+
+        std::filesystem::path target_path = std::filesystem::weakly_canonical(base_path / file_path, ec);
+        if (ec)
+        {
+            MF_Log("%s: Failed to resolve target path '%s': %s", native_name, file_path, ec.message().c_str());
+            return false;
+        }
+
+        std::string base_str = base_path.string();
+        std::string target_str = target_path.string();
+
+        if (target_str.find(base_str) != 0)
+        {
+            MF_Log("%s: Path traversal attempt blocked: %s", native_name, file_path);
+            return false;
+        }
+
+        resolved_path_out = target_str;
+        return true;
+    }
+    catch (const std::exception& e)
+    {
+        MF_Log("%s: Filesystem exception for path '%s': %s", native_name, file_path, e.what());
+        return false;
+    }
+    catch (...)
+    {
+        MF_Log("%s: Unknown filesystem exception for path '%s'", native_name, file_path);
+        return false;
+    }
+}
+
+struct NativeRequestParams {
+    std::string url;
+    std::string callback;
+    OptionsId options_id;
+    std::shared_ptr<std::vector<cell>> user_data;
+};
+
+NativeRequestParams ExtractRequestParams(AMX* amx, cell* params) {
+    enum { arg_count, arg_url, arg_callback, arg_option_id, arg_data, arg_data_len };
+    
+    // params[0] contains the number of bytes for the arguments (count * sizeof(cell))
+    int arg_num = params[0] / sizeof(cell);
+
+    int url_len = 0;
+    char* url_ptr = MF_GetAmxString(amx, params[arg_url], 0, &url_len);
+    if (!url_ptr) {
+        throw std::runtime_error("ezhttp: URL pointer is null");
+    }
+
+    int callback_len = 0;
+    char* callback_ptr = nullptr;
+    if (arg_num >= 2) {
+        callback_ptr = MF_GetAmxString(amx, params[arg_callback], 1, &callback_len);
+    }
+    std::string callback_str = (callback_ptr) ? std::string(callback_ptr, callback_len) : "";
+
+    OptionsId options_id = OptionsId::Null;
+    if (arg_num >= 3) {
+        options_id = (OptionsId)params[arg_option_id];
+    }
+
+    std::shared_ptr<std::vector<cell>> user_data = nullptr;
+    if (arg_num >= 5) {
+        int data_len = params[arg_data_len];
+        if (data_len > 0) {
+            // Safety limit: 10MB (2.5 million cells). 
+            // This prevents "vector too long" and OOM crashes from garbage data_len.
+            if (data_len > 2500000) {
+                throw std::runtime_error("ezhttp: data_len exceeds safety limit (10MB)");
+            }
+
+            user_data = std::make_shared<std::vector<cell>>(data_len);
+            MF_CopyAmxMemory(user_data->data(), MF_GetAmxAddr(amx, params[arg_data]), data_len);
+        }
+    }
+    return { std::string(url_ptr, url_len), callback_str, options_id, user_data };
+}
+
+RequestId SendRequest(AMX* amx, RequestMethod method, OptionsId options_id, const std::string& url, const std::string& callback, std::shared_ptr<std::vector<cell>> user_data = nullptr);
 
 std::unique_ptr<EasyHttpModule> g_EasyHttpModule;
 std::unique_ptr<JSONMngr> g_JsonManager;
@@ -226,141 +321,120 @@ cell AMX_NATIVE_CALL ezhttp_option_set_queue(AMX* amx, cell* params)
 // native EzHttpRequest:ezhttp_get(const url[], const on_complete[], EzHttpOptions:options_id = EzHttpOptions:0);
 cell AMX_NATIVE_CALL ezhttp_get(AMX* amx, cell* params)
 {
-    enum { arg_count, arg_url, arg_callback, arg_option_id, arg_data, arg_data_len };
-
-    int url_len;
-    char* url = MF_GetAmxString(amx, params[arg_url], 0, &url_len);
-
-    int callback_len;
-    char* callback = MF_GetAmxString(amx, params[arg_callback], 1, &callback_len);
-
-    int data_len = 0;
-    cell* data = nullptr;
-    if (params[arg_count] > 3)
-    {
-        data_len = params[arg_data_len];
-        if (data_len > 0)
-        {
-            data = new cell[data_len];
-            MF_CopyAmxMemory(data, MF_GetAmxAddr(amx, params[arg_data]), data_len);
-        }
+    try {
+        auto req = ExtractRequestParams(amx, params);
+        return (cell)SendRequest(amx, RequestMethod::HttpGet, req.options_id, req.url, req.callback, req.user_data);
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_get: %s", e.what());
+        return 0;
     }
-
-    auto options_id = (OptionsId)params[arg_option_id];
-
-    return (cell)SendRequest(amx, RequestMethod::HttpGet, options_id, std::string(url, url_len), std::string(callback, callback_len), data, data_len);
 }
 
 // native EzHttpRequest:ezhttp_post(const url[], const on_complete[], EzHttpOptions:options_id = EzHttpOptions:0);
 cell AMX_NATIVE_CALL ezhttp_post(AMX* amx, cell* params)
 {
-    enum { arg_count, arg_url, arg_callback, arg_option_id, arg_data, arg_data_len };
-
-    int url_len;
-    char* url = MF_GetAmxString(amx, params[arg_url], 0, &url_len);
-
-    int callback_len;
-    char* callback = MF_GetAmxString(amx, params[arg_callback], 1, &callback_len);
-
-    int data_len = 0;
-    cell* data = nullptr;
-    if (params[arg_count] > 3)
-    {
-        data_len = params[arg_data_len];
-        if (data_len > 0)
-        {
-            data = new cell[data_len];
-            MF_CopyAmxMemory(data, MF_GetAmxAddr(amx, params[arg_data]), data_len);
-        }
+    try {
+        auto req = ExtractRequestParams(amx, params);
+        return (cell)SendRequest(amx, RequestMethod::HttpPost, req.options_id, req.url, req.callback, req.user_data);
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_post: %s", e.what());
+        return 0;
     }
-
-    auto options_id = (OptionsId)params[arg_option_id];
-
-    return (cell)SendRequest(amx, RequestMethod::HttpPost, options_id, std::string(url, url_len), std::string(callback, callback_len), data, data_len);
 }
 
 // native EzHttpRequest:ezhttp_put(const url[], const on_complete[], EzHttpOptions:options_id = EzHttpOptions:0);
 cell AMX_NATIVE_CALL ezhttp_put(AMX* amx, cell* params)
 {
-    enum { arg_count, arg_url, arg_callback, arg_option_id, arg_data, arg_data_len };
-
-    int url_len;
-    char* url = MF_GetAmxString(amx, params[arg_url], 0, &url_len);
-
-    int callback_len;
-    char* callback = MF_GetAmxString(amx, params[arg_callback], 1, &callback_len);
-
-    int data_len = 0;
-    cell* data = nullptr;
-    if (params[arg_count] > 3)
-    {
-        data_len = params[arg_data_len];
-        if (data_len > 0)
-        {
-            data = new cell[data_len];
-            MF_CopyAmxMemory(data, MF_GetAmxAddr(amx, params[arg_data]), data_len);
-        }
+    try {
+        auto req = ExtractRequestParams(amx, params);
+        return (cell)SendRequest(amx, RequestMethod::HttpPut, req.options_id, req.url, req.callback, req.user_data);
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_put: %s", e.what());
+        return 0;
     }
-
-    auto options_id = (OptionsId)params[arg_option_id];
-
-    return (cell)SendRequest(amx, RequestMethod::HttpPut, options_id, std::string(url, url_len), std::string(callback, callback_len), data, data_len);
 }
 
 // native EzHttpRequest:ezhttp_patch(const url[], const on_complete[], EzHttpOptions:options_id = EzHttpOptions:0);
 cell AMX_NATIVE_CALL ezhttp_patch(AMX* amx, cell* params)
 {
-    enum { arg_count, arg_url, arg_callback, arg_option_id, arg_data, arg_data_len };
-
-    int url_len;
-    char* url = MF_GetAmxString(amx, params[arg_url], 0, &url_len);
-
-    int callback_len;
-    char* callback = MF_GetAmxString(amx, params[arg_callback], 1, &callback_len);
-
-    int data_len = 0;
-    cell* data = nullptr;
-    if (params[arg_count] > 3)
-    {
-        data_len = params[arg_data_len];
-        if (data_len > 0)
-        {
-            data = new cell[data_len];
-            MF_CopyAmxMemory(data, MF_GetAmxAddr(amx, params[arg_data]), data_len);
-        }
+    try {
+        auto req = ExtractRequestParams(amx, params);
+        return (cell)SendRequest(amx, RequestMethod::HttpPatch, req.options_id, req.url, req.callback, req.user_data);
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_patch: %s", e.what());
+        return 0;
     }
-
-    auto options_id = (OptionsId)params[arg_option_id];
-
-    return (cell)SendRequest(amx, RequestMethod::HttpPatch, options_id, std::string(url, url_len), std::string(callback, callback_len), data, data_len);
 }
 
 // native EzHttpRequest:ezhttp_delete(const url[], const on_complete[], EzHttpOptions:options_id = EzHttpOptions:0);
 cell AMX_NATIVE_CALL ezhttp_delete(AMX* amx, cell* params)
 {
-    enum { arg_count, arg_url, arg_callback, arg_option_id, arg_data, arg_data_len };
-
-    int url_len;
-    char* url = MF_GetAmxString(amx, params[arg_url], 0, &url_len);
-
-    int callback_len;
-    char* callback = MF_GetAmxString(amx, params[arg_callback], 1, &callback_len);
-
-    int data_len = 0;
-    cell* data = nullptr;
-    if (params[arg_count] > 3)
-    {
-        data_len = params[arg_data_len];
-        if (data_len > 0)
-        {
-            data = new cell[data_len];
-            MF_CopyAmxMemory(data, MF_GetAmxAddr(amx, params[arg_data]), data_len);
-        }
+    try {
+        auto req = ExtractRequestParams(amx, params);
+        return (cell)SendRequest(amx, RequestMethod::HttpDelete, req.options_id, req.url, req.callback, req.user_data);
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_delete: %s", e.what());
+        return 0;
     }
+}
 
-    auto options_id = (OptionsId)params[arg_option_id];
+// native EzHttpRequest:ezhttp_download_url(const url[], const save_path[], const on_complete[], EzHttpOptions:options_id = EzHttpOptions:0, const data[] = "", data_len = 0);
+cell AMX_NATIVE_CALL ezhttp_download_url(AMX* amx, cell* params)
+{
+    try {
+        enum { arg_count, arg_url, arg_save_path, arg_callback, arg_option_id, arg_data, arg_data_len };
 
-    return (cell)SendRequest(amx, RequestMethod::HttpDelete, options_id, std::string(url, url_len), std::string(callback, callback_len), data, data_len);
+        int arg_num = params[0] / sizeof(cell);
+
+        int url_len;
+        char* url = MF_GetAmxString(amx, params[arg_url], 0, &url_len);
+        if (!url) throw std::runtime_error("URL pointer is null");
+
+        int save_path_len;
+        char* save_path = MF_GetAmxString(amx, params[arg_save_path], 1, &save_path_len);
+        if (!save_path) throw std::runtime_error("Save path pointer is null");
+
+        int callback_len = 0;
+        char* callback = nullptr;
+        if (arg_num >= 3) {
+            callback = MF_GetAmxString(amx, params[arg_callback], 2, &callback_len);
+        }
+
+        std::shared_ptr<std::vector<cell>> user_data = nullptr;
+        if (arg_num >= 6)
+        {
+            int data_len = params[arg_data_len];
+            if (data_len > 0)
+            {
+                // Safety limit: 10MB (2.5 million cells). 
+                if (data_len > 2500000) {
+                    throw std::runtime_error("ezhttp: data_len exceeds safety limit (10MB)");
+                }
+                user_data = std::make_shared<std::vector<cell>>(data_len);
+                MF_CopyAmxMemory(user_data->data(), MF_GetAmxAddr(amx, params[arg_data]), data_len);
+            }
+        }
+
+        OptionsId options_id = OptionsId::Null;
+        if (arg_num >= 4) {
+            options_id = (OptionsId)params[arg_option_id];
+        }
+
+        // Path Traversal Protection
+        std::string resolved_save_path;
+        if (!ValidatePath("ezhttp_download_url", save_path, resolved_save_path))
+            return 0;
+
+        if (!ValidateOptionsId(amx, options_id))
+            return 0;
+
+        g_EasyHttpModule->GetOptions(options_id).options_builder.SetFilePath(resolved_save_path);
+
+        return (cell)SendRequest(amx, RequestMethod::HttpDownload, options_id, std::string(url, url_len), (callback) ? std::string(callback, callback_len) : "", user_data);
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_download_url: %s", e.what());
+        return 0;
+    }
 }
 
 // native ezhttp_is_request_exists(EzHttpRequest:request_id);
@@ -371,7 +445,7 @@ cell AMX_NATIVE_CALL ezhttp_is_request_exists(AMX* amx, cell* params)
     return g_EasyHttpModule->IsRequestExists(request_id);
 }
 
-// native ezhttp_cancel_request(EzHttpRequest:request_id);
+// native JSON:ezhttp_get_json(EzHttpRequest:request_id);
 cell AMX_NATIVE_CALL ezhttp_cancel_request(AMX* amx, cell* params)
 {
     auto request_id = (RequestId)params[1];
@@ -421,88 +495,149 @@ cell AMX_NATIVE_CALL ezhttp_get_http_code(AMX* amx, cell* params)
 
 cell AMX_NATIVE_CALL ezhttp_get_data(AMX* amx, cell* params)
 {
-    auto request_id = (RequestId)params[1];
-    cell max_len = params[3];
+    try {
+        int arg_num = params[0] / sizeof(cell);
+        auto request_id = (RequestId)params[1];
+        cell max_len = 0;
+        if (arg_num >= 3) {
+            max_len = params[3];
+        }
 
-    if (!ValidateRequestId(amx, request_id) || max_len == 0)
+        if (!ValidateRequestId(amx, request_id) || max_len <= 0)
+            return 0;
+
+        const Response& response = g_EasyHttpModule->GetRequest(request_id).response;
+
+        utils::SetAmxStringUTF8CharSafe(amx, params[2], response.text.c_str(), response.text.length(), max_len);
+
+        return 1;
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_get_data: %s", e.what());
         return 0;
-
-    const Response& response = g_EasyHttpModule->GetRequest(request_id).response;
-
-    utils::SetAmxStringUTF8CharSafe(amx, params[2], response.text.c_str(), response.text.length(), max_len);
-
-    return 0;
+    }
 }
 
 // native EzJSON:ezhttp_parse_json_response(EzHttpRequest:request_id, bool:with_comments = false);
 cell AMX_NATIVE_CALL ezhttp_parse_json_response(AMX* amx, cell* params)
 {
-    auto request_id = (RequestId)params[1];
-    bool with_comments = (bool)params[2];
+    try {
+        int arg_num = params[0] / sizeof(cell);
+        auto request_id = (RequestId)params[1];
+        bool with_comments = false;
+        if (arg_num >= 2) {
+            with_comments = (bool)params[2];
+        }
 
-    if (!ValidateRequestId(amx, request_id))
-        return 0;
+        if (!ValidateRequestId(amx, request_id))
+            return 0;
 
-    const Response& response = g_EasyHttpModule->GetRequest(request_id).response;
+        const Response& response = g_EasyHttpModule->GetRequest(request_id).response;
 
-    JS_Handle json_handle;
-    bool result = g_JsonManager->Parse(response.text.c_str(), &json_handle, false, with_comments);
+        JS_Handle json_handle;
+        bool result = g_JsonManager->Parse(response.text.c_str(), &json_handle, false, with_comments);
 
-    return result ? json_handle : -1;
+        return result ? json_handle : -1;
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_parse_json_response: %s", e.what());
+        return -1;
+    }
 }
 
 cell AMX_NATIVE_CALL ezhttp_get_url(AMX* amx, cell* params)
 {
-    auto request_id = (RequestId)params[1];
-    cell max_len = params[3];
+    try {
+        int arg_num = params[0] / sizeof(cell);
+        auto request_id = (RequestId)params[1];
+        cell max_len = 0;
+        if (arg_num >= 3) {
+            max_len = params[3];
+        }
 
-    if (!ValidateRequestId(amx, request_id) || max_len == 0)
+        if (!ValidateRequestId(amx, request_id) || max_len <= 0)
+            return 0;
+
+        const Response& response = g_EasyHttpModule->GetRequest(request_id).response;
+
+        utils::SetAmxStringUTF8CharSafe(amx, params[2], response.url.c_str(), response.url.str().length(), max_len);
+
+        return 1;
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_get_url: %s", e.what());
         return 0;
-
-    const Response& response = g_EasyHttpModule->GetRequest(request_id).response;
-
-    utils::SetAmxStringUTF8CharSafe(amx, params[2], response.url.c_str(), response.url.str().length(), max_len);
-
-    return 0;
+    }
 }
 
 cell AMX_NATIVE_CALL ezhttp_save_data_to_file(AMX* amx, cell* params)
 {
-    auto request_id = (RequestId)params[1];
+    try {
+        auto request_id = (RequestId)params[1];
 
-    int file_path_len;
-    char* file_path = MF_GetAmxString(amx, params[2], 0, &file_path_len);
-    cell max_len = params[3];
+        int file_path_len;
+        char* file_path = MF_GetAmxString(amx, params[2], 0, &file_path_len);
+        if (!file_path) throw std::runtime_error("File path pointer is null");
 
-    if (!ValidateRequestId(amx, request_id))
+        if (!ValidateRequestId(amx, request_id))
+            return 0;
+
+        const Response& response = g_EasyHttpModule->GetRequest(request_id).response;
+
+        if (response.text.empty())
+            return 0;
+
+        std::string resolved_path;
+        if (!ValidatePath("ezhttp_save_data_to_file", file_path, resolved_path))
+            return 0;
+
+        std::ofstream file(resolved_path, std::ofstream::out | std::ofstream::binary);
+        if (!file.is_open()) {
+            MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_save_data_to_file: Could not open file for writing: %s", resolved_path.c_str());
+            return 0;
+        }
+
+        file.write(response.text.data(), response.text.length());
+        file.close();
+
+        return (cell)response.text.length();
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_save_data_to_file: %s", e.what());
         return 0;
-
-    const Response& response = g_EasyHttpModule->GetRequest(request_id).response;
-
-    if (response.text.empty())
-        return 0;
-
-    std::ofstream file(MF_BuildPathname("%s", file_path), std::ofstream::out | std::ofstream::binary);
-    if (!file.is_open())
-        return 0;
-
-    file.write(response.text.data(), response.text.length());
-    file.close();
-
-    return response.text.length();
+    }
 }
 
 cell AMX_NATIVE_CALL ezhttp_save_data_to_file2(AMX* amx, cell* params)
 {
-    auto request_id = (RequestId)params[1];
-    FILE* file_handle = (FILE*)params[2];
+    try {
+        auto request_id = (RequestId)params[1];
+        cell file_cell = params[2];
 
-    if (!ValidateRequestId(amx, request_id))
+        if (!ValidateRequestId(amx, request_id))
+            return 0;
+
+        if (file_cell == 0)
+        {
+            MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_save_data_to_file2: Invalid file handle (null)");
+            return 0;
+        }
+
+        // Safety: for HLDS (32-bit), cell is 32-bit and usually matches FILE*.
+        // However, this is inherently unsafe if the handle is not a valid FILE*.
+        FILE* file_handle = reinterpret_cast<FILE*>(static_cast<uintptr_t>(static_cast<ucell>(file_cell)));
+        if (!file_handle) {
+            MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_save_data_to_file2: Resolved file handle is null");
+            return 0;
+        }
+
+        const Response& response = g_EasyHttpModule->GetRequest(request_id).response;
+
+        if (response.text.empty())
+            return 0;
+
+        size_t written = std::fwrite(response.text.data(), sizeof(char), response.text.length(), file_handle);
+        return (cell)written;
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_save_data_to_file2: %s", e.what());
         return 0;
-
-    const Response& response = g_EasyHttpModule->GetRequest(request_id).response;
-
-    return std::fwrite(response.text.data(), sizeof(char), response.text.length(), file_handle);
+    }
 }
 
 cell AMX_NATIVE_CALL ezhttp_get_headers_count(AMX* amx, cell* params)
@@ -519,45 +654,55 @@ cell AMX_NATIVE_CALL ezhttp_get_headers_count(AMX* amx, cell* params)
 
 cell AMX_NATIVE_CALL ezhttp_get_headers(AMX* amx, cell* params)
 {
-    auto request_id = (RequestId)params[1];
-    int key_len;
-    char* key = MF_GetAmxString(amx, params[2], 0, &key_len);
-    cell value_max_len = params[4];
+    try {
+        auto request_id = (RequestId)params[1];
+        int key_len;
+        char* key = MF_GetAmxString(amx, params[2], 0, &key_len);
+        cell value_max_len = params[4];
 
-    if (!ValidateRequestId(amx, request_id))
+        if (!ValidateRequestId(amx, request_id))
+            return 0;
+
+        const Response& response = g_EasyHttpModule->GetRequest(request_id).response;
+
+        if (key && response.header.count(key))
+        {
+            utils::SetAmxStringUTF8CharSafe(amx, params[3], response.header.at(key).c_str(), response.header.at(key).length(), value_max_len);
+            return 1;
+        }
+
         return 0;
-
-    const Response& response = g_EasyHttpModule->GetRequest(request_id).response;
-
-    const std::string header_key(key, key_len);
-    if (response.header.count(header_key) == 1)
-    {
-        const std::string& header_value = response.header.at(header_key);
-
-        utils::SetAmxStringUTF8CharSafe(amx, params[3], header_value.c_str(), header_value.length(), value_max_len);
-
-        return 1;
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_get_headers: %s", e.what());
+        return 0;
     }
-
-    return 0;
 }
 
 cell AMX_NATIVE_CALL ezhttp_iterate_headers(AMX* amx, cell* params)
 {
     auto request_id = (RequestId)params[1];
-    cell iter = params[2];
-    int key_len;
-    char* key = MF_GetAmxString(amx, params[3], 0, &key_len);
-    cell value_max_len = params[5];
+    int callback_len;
+    char* callback_name = MF_GetAmxString(amx, params[2], 0, &callback_len);
 
     if (!ValidateRequestId(amx, request_id))
         return 0;
 
     const RequestData& request = g_EasyHttpModule->GetRequest(request_id);
-    const cpr::Header& header = request.response.header;
+    int func_index = MF_RegisterSPForwardByName(amx, callback_name, FP_ARRAY, FP_STRING, FP_STRING, FP_DONE);
 
+    if (func_index == -1)
+    {
+        MF_LogError(amx, AMX_ERR_NATIVE, "Function \"%s\" not found", callback_name);
+        return 0;
+    }
 
-    return 0;
+    for (const auto& it : request.response.header)
+    {
+        MF_ExecuteForward(func_index, (cell)request_id, it.first.c_str(), it.second.c_str());
+    }
+
+    MF_UnregisterSPForward(func_index);
+    return 1;
 }
 
 cell AMX_NATIVE_CALL ezhttp_get_elapsed(AMX* amx, cell* params)
@@ -614,7 +759,29 @@ cell AMX_NATIVE_CALL ezhttp_get_cookies(AMX* amx, cell* params)
 
 cell AMX_NATIVE_CALL ezhttp_iterate_cookies(AMX* amx, cell* params)
 {
-    return 0;
+    auto request_id = (RequestId)params[1];
+    int callback_len;
+    char* callback_name = MF_GetAmxString(amx, params[2], 0, &callback_len);
+
+    if (!ValidateRequestId(amx, request_id))
+        return 0;
+
+    Response& response = g_EasyHttpModule->GetRequest(request_id).response;
+    int func_index = MF_RegisterSPForwardByName(amx, callback_name, FP_ARRAY, FP_STRING, FP_STRING, FP_DONE);
+
+    if (func_index == -1)
+    {
+        MF_LogError(amx, AMX_ERR_NATIVE, "Function \"%s\" not found", callback_name);
+        return 0;
+    }
+
+    for (auto it = response.cookies.begin(); it != response.cookies.end(); ++it)
+    {
+        MF_ExecuteForward(func_index, (cell)request_id, it->GetName().c_str(), it->GetValue().c_str());
+    }
+
+    MF_UnregisterSPForward(func_index);
+    return 1;
 }
 
 cell AMX_NATIVE_CALL ezhttp_get_error_code(AMX* amx, cell* params)
@@ -702,103 +869,206 @@ cell AMX_NATIVE_CALL ezhttp_get_user_data(AMX* amx, cell* params)
 
 cell AMX_NATIVE_CALL ezhttp_ftp_upload(AMX* amx, cell* params)
 {
-    int len;
-    std::string user(MF_GetAmxString(amx, params[1], 0, &len));
-    std::string password (MF_GetAmxString(amx, params[2], 0, &len));
-    std::string host = MF_GetAmxString(amx, params[3], 0, &len);
-    std::string remote_file = MF_GetAmxString(amx, params[4], 0, &len);
-    int local_file_len;
-    char* local_file = MF_GetAmxString(amx, params[5], 1, &local_file_len);
-    std::string callback = MF_GetAmxString(amx, params[6], 0, &len);
-    bool secure = params[7];
-    auto options_id = (OptionsId)params[8];
+    try {
+        int arg_num = params[0] / sizeof(cell);
+        int len;
+        char* user_ptr = MF_GetAmxString(amx, params[1], 0, &len);
+        std::string user(user_ptr ? user_ptr : "");
+        char* pass_ptr = MF_GetAmxString(amx, params[2], 0, &len);
+        std::string password (pass_ptr ? pass_ptr : "");
+        char* host_ptr = MF_GetAmxString(amx, params[3], 0, &len);
+        if (!host_ptr) throw std::runtime_error("Host pointer is null");
+        std::string host(host_ptr);
+        char* remote_ptr = MF_GetAmxString(amx, params[4], 0, &len);
+        if (!remote_ptr) throw std::runtime_error("Remote file pointer is null");
+        std::string remote_file(remote_ptr);
+        
+        int local_file_len;
+        char* local_file = MF_GetAmxString(amx, params[5], 1, &local_file_len);
+        if (!local_file) throw std::runtime_error("Local file pointer is null");
 
-    std::string url = utils::ConstructFtpUrl(user, password, host, remote_file);
+        char* callback_ptr = nullptr;
+        if (arg_num >= 6) {
+            callback_ptr = MF_GetAmxString(amx, params[6], 0, &len);
+        }
+        std::string callback(callback_ptr ? callback_ptr : "");
 
-    if (options_id == OptionsId::Null)
-        options_id = g_EasyHttpModule->CreateOptions();
+        bool secure = false;
+        if (arg_num >= 7) {
+            secure = (bool)params[7];
+        }
 
-    auto& builder = g_EasyHttpModule->GetOptionsBuilder(options_id);
-    builder.SetFilePath(MF_BuildPathname("%s", local_file));
-    builder.SetSecure(secure);
+        auto options_id = OptionsId::Null;
+        if (arg_num >= 8) {
+            options_id = (OptionsId)params[8];
+        }
 
-    SendRequest(amx, RequestMethod::FtpUpload, options_id, url, callback);
+        std::string url = utils::ConstructFtpUrl(user, password, host, remote_file);
 
-    return 0;
+        if (options_id == OptionsId::Null)
+            options_id = g_EasyHttpModule->CreateOptions();
+        else if (!ValidateOptionsId(amx, options_id))
+            return 0;
+
+        std::string resolved_path;
+        if (!ValidatePath("ezhttp_ftp_upload", local_file, resolved_path))
+            return 0;
+
+        auto& builder = g_EasyHttpModule->GetOptionsBuilder(options_id);
+        builder.SetFilePath(resolved_path);
+        builder.SetSecure(secure);
+
+        SendRequest(amx, RequestMethod::FtpUpload, options_id, url, callback);
+
+        return 0;
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_ftp_upload: %s", e.what());
+        return 0;
+    }
 }
 
 cell AMX_NATIVE_CALL ezhttp_ftp_upload2(AMX* amx, cell* params)
 {
+    int arg_num = params[0] / sizeof(cell);
     int url_str_len;
     char* url_str = MF_GetAmxString(amx, params[1], 0, &url_str_len);
 
     int local_file_len;
     char* local_file = MF_GetAmxString(amx, params[2], 1, &local_file_len);
 
-    int callback_len;
-    char* callback = MF_GetAmxString(amx, params[3], 2, &callback_len);
+    int callback_len = 0;
+    char* callback = nullptr;
+    if (arg_num >= 3) {
+        callback = MF_GetAmxString(amx, params[3], 2, &callback_len);
+    }
 
-    bool secure = params[4];
-    auto options_id = (OptionsId)params[5];
+    bool secure = false;
+    if (arg_num >= 4) {
+        secure = (bool)params[4];
+    }
+
+    auto options_id = OptionsId::Null;
+    if (arg_num >= 5) {
+        options_id = (OptionsId)params[5];
+    }
 
     if (options_id == OptionsId::Null)
         options_id = g_EasyHttpModule->CreateOptions();
+    else if (!ValidateOptionsId(amx, options_id))
+        return 0;
+
+    std::string resolved_path;
+    if (!ValidatePath("ezhttp_ftp_upload2", local_file, resolved_path))
+        return 0;
 
     auto& builder = g_EasyHttpModule->GetOptionsBuilder(options_id);
-    builder.SetFilePath(MF_BuildPathname("%s", local_file));
+    builder.SetFilePath(resolved_path);
     builder.SetSecure(secure);
 
-    SendRequest(amx, RequestMethod::FtpUpload, options_id, std::string(url_str, url_str_len), std::string(callback, callback_len));
+    SendRequest(amx, RequestMethod::FtpUpload, options_id, std::string(url_str, url_str_len), (callback) ? std::string(callback, callback_len) : "");
 
     return 0;
 }
 
 cell AMX_NATIVE_CALL ezhttp_ftp_download(AMX* amx, cell* params)
 {
-    int len;
-    std::string user(MF_GetAmxString(amx, params[1], 0, &len));
-    std::string password (MF_GetAmxString(amx, params[2], 0, &len));
-    std::string host = MF_GetAmxString(amx, params[3], 0, &len);
-    std::string remote_file = MF_GetAmxString(amx, params[4], 0, &len);
-    int local_file_len;
-    char* local_file = MF_GetAmxString(amx, params[5], 1, &local_file_len);
-    std::string callback = MF_GetAmxString(amx, params[6], 0, &len);
-    bool secure = params[7];
-    auto options_id = (OptionsId)params[8];
+    try {
+        int arg_num = params[0] / sizeof(cell);
+        int len;
+        char* user_ptr = MF_GetAmxString(amx, params[1], 0, &len);
+        std::string user(user_ptr ? user_ptr : "");
+        char* pass_ptr = MF_GetAmxString(amx, params[2], 0, &len);
+        std::string password (pass_ptr ? pass_ptr : "");
+        char* host_ptr = MF_GetAmxString(amx, params[3], 0, &len);
+        if (!host_ptr) throw std::runtime_error("Host pointer is null");
+        std::string host(host_ptr);
+        char* remote_ptr = MF_GetAmxString(amx, params[4], 0, &len);
+        if (!remote_ptr) throw std::runtime_error("Remote file pointer is null");
+        std::string remote_file(remote_ptr);
 
-    std::string url = utils::ConstructFtpUrl(user, password, host, remote_file);
+        int local_file_len;
+        char* local_file = MF_GetAmxString(amx, params[5], 1, &local_file_len);
+        if (!local_file) throw std::runtime_error("Local file pointer is null");
 
-    if (options_id == OptionsId::Null)
-        options_id = g_EasyHttpModule->CreateOptions();
+        char* callback_ptr = nullptr;
+        if (arg_num >= 6) {
+            callback_ptr = MF_GetAmxString(amx, params[6], 0, &len);
+        }
+        std::string callback(callback_ptr ? callback_ptr : "");
 
-    auto& builder = g_EasyHttpModule->GetOptionsBuilder(options_id);
-    builder.SetFilePath(MF_BuildPathname("%s", local_file));
-    builder.SetSecure(secure);
+        bool secure = false;
+        if (arg_num >= 7) {
+            secure = (bool)params[7];
+        }
 
-    SendRequest(amx, RequestMethod::FtpDownload, options_id, url, callback);
+        auto options_id = OptionsId::Null;
+        if (arg_num >= 8) {
+            options_id = (OptionsId)params[8];
+        }
 
-    return 0;
+        std::string url = utils::ConstructFtpUrl(user, password, host, remote_file);
+
+        if (options_id == OptionsId::Null)
+            options_id = g_EasyHttpModule->CreateOptions();
+        else if (!ValidateOptionsId(amx, options_id))
+            return 0;
+
+        std::string resolved_path;
+        if (!ValidatePath("ezhttp_ftp_download", local_file, resolved_path))
+            return 0;
+
+        auto& builder = g_EasyHttpModule->GetOptionsBuilder(options_id);
+        builder.SetFilePath(resolved_path);
+        builder.SetSecure(secure);
+
+        SendRequest(amx, RequestMethod::FtpDownload, options_id, url, callback);
+
+        return 0;
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_ftp_download: %s", e.what());
+        return 0;
+    }
 }
 
 cell AMX_NATIVE_CALL ezhttp_ftp_download2(AMX* amx, cell* params)
 {
+    int arg_num = params[0] / sizeof(cell);
     int url_str_len;
     char* url_str = MF_GetAmxString(amx, params[1], 0, &url_str_len);
 
     int local_file_len;
     char* local_file = MF_GetAmxString(amx, params[2], 1, &local_file_len);
 
-    int callback_len;
-    char* callback = MF_GetAmxString(amx, params[3], 2, &callback_len);
+    int callback_len = 0;
+    char* callback = nullptr;
+    if (arg_num >= 3) {
+        callback = MF_GetAmxString(amx, params[3], 2, &callback_len);
+    }
 
-    bool secure = params[4];
-    auto options_id = (OptionsId)params[5];
+    bool secure = false;
+    if (arg_num >= 4) {
+        secure = (bool)params[4];
+    }
+
+    auto options_id = OptionsId::Null;
+    if (arg_num >= 5) {
+        options_id = (OptionsId)params[5];
+    }
+
+    if (options_id == OptionsId::Null)
+        options_id = g_EasyHttpModule->CreateOptions();
+    else if (!ValidateOptionsId(amx, options_id))
+        return 0;
+
+    std::string resolved_path;
+    if (!ValidatePath("ezhttp_ftp_download2", local_file, resolved_path))
+        return 0;
 
     auto& builder = g_EasyHttpModule->GetOptionsBuilder(options_id);
-    builder.SetFilePath(MF_BuildPathname("%s", local_file));
+    builder.SetFilePath(resolved_path);
     builder.SetSecure(secure);
 
-    SendRequest(amx, RequestMethod::FtpDownload, options_id, std::string(url_str, url_str_len), std::string(callback, callback_len));
+    SendRequest(amx, RequestMethod::FtpDownload, options_id, std::string(url_str, url_str_len), (callback) ? std::string(callback, callback_len) : "");
 
     return 0;
 }
@@ -841,12 +1111,12 @@ cell AMX_NATIVE_CALL ezhttp_steam_to_steam64(AMX* amx, cell* params)
     return 1;
 }
 
-RequestId SendRequest(AMX* amx, RequestMethod method, OptionsId options_id, const std::string& url, const std::string& callback, cell* data, const int data_len)
+RequestId SendRequest(AMX* amx, RequestMethod method, OptionsId options_id, const std::string& url, const std::string& callback, std::shared_ptr<std::vector<cell>> user_data)
 {
     int callback_id = -1;
     if (!callback.empty())
     {
-        if (data == nullptr)
+        if (!user_data)
         {
             callback_id = MF_RegisterSPForwardByName(amx, callback.c_str(), FP_CELL, FP_DONE);
         } else {
@@ -855,29 +1125,32 @@ RequestId SendRequest(AMX* amx, RequestMethod method, OptionsId options_id, cons
 
         if (callback_id == -1)
         {
-            delete data;
             MF_LogError(amx, AMX_ERR_NATIVE, "Callback function \"%s\" is not exists", callback.c_str());
             return RequestId::Null;
         }
     }
 
-    auto on_complete = [callback_id, data, data_len](RequestId request_id) {
+    auto on_complete = [callback_id, user_data](RequestId request_id) {
         if (callback_id == -1)
         {
-            delete data;
             g_EasyHttpModule->DeleteRequest(request_id, true);
             return;
         }
 
-        if (data == nullptr)
-        {
-            MF_ExecuteForward(callback_id, request_id);
-        } else {
-            MF_ExecuteForward(callback_id, request_id, MF_PrepareCellArray(data, data_len));
+        try {
+            if (!user_data)
+            {
+                MF_ExecuteForward(callback_id, request_id);
+            } else {
+                MF_ExecuteForward(callback_id, request_id, MF_PrepareCellArray(user_data->data(), user_data->size()));
+            }
+        } catch (const std::exception& e) {
+            MF_LogError(nullptr, AMX_ERR_NATIVE, "ezhttp: Exception in callback execution: %s", e.what());
+        } catch (...) {
+            MF_LogError(nullptr, AMX_ERR_NATIVE, "ezhttp: Unknown exception in callback execution");
         }
-        MF_UnregisterSPForward(callback_id);
 
-        delete data;
+        MF_UnregisterSPForward(callback_id);
         g_EasyHttpModule->DeleteRequest(request_id, true);
     };
 
@@ -922,29 +1195,47 @@ bool ValidateQueueId(AMX* amx, QueueId queue_id)
 template <class TMethod>
 void SetKeyValueOption(AMX* amx, cell* params, TMethod method)
 {
-    auto options_id = (OptionsId)params[1];
-    int key_len;
-    char* key = MF_GetAmxString(amx, params[2], 0, &key_len);
-    int value_len;
-    char* value = MF_GetAmxString(amx, params[3], 1, &value_len);
+    try {
+        auto options_id = (OptionsId)params[1];
+        int key_len;
+        char* key = MF_GetAmxString(amx, params[2], 0, &key_len);
+        int value_len;
+        char* value = MF_GetAmxString(amx, params[3], 1, &value_len);
 
-    if (!ValidateOptionsId(amx, options_id))
-        return;
+        if (!ValidateOptionsId(amx, options_id))
+            return;
 
-    (g_EasyHttpModule->GetOptions(options_id).options_builder.*method)(std::string(key, key_len), std::string(value, value_len));
+        if (!key || !value) {
+            MF_LogError(amx, AMX_ERR_NATIVE, "Key or value pointer is null");
+            return;
+        }
+
+        (g_EasyHttpModule->GetOptions(options_id).options_builder.*method)(std::string(key, key_len), std::string(value, value_len));
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "Exception in SetKeyValueOption: %s", e.what());
+    }
 }
 
 template <class TMethod>
 void SetStringOption(AMX* amx, cell* params, TMethod method)
 {
-    auto options_id = (OptionsId)params[1];
-    int value_len;
-    char* value = MF_GetAmxString(amx, params[2], 0, &value_len);
+    try {
+        auto options_id = (OptionsId)params[1];
+        int value_len;
+        char* value = MF_GetAmxString(amx, params[2], 0, &value_len);
 
-    if (!ValidateOptionsId(amx, options_id))
-        return;
+        if (!ValidateOptionsId(amx, options_id))
+            return;
 
-    (g_EasyHttpModule->GetOptions(options_id).options_builder.*method)(std::string(value, value_len));
+        if (!value) {
+            MF_LogError(amx, AMX_ERR_NATIVE, "Value pointer is null");
+            return;
+        }
+
+        (g_EasyHttpModule->GetOptions(options_id).options_builder.*method)(std::string(value, value_len));
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "Exception in SetStringOption: %s", e.what());
+    }
 }
 
 AMX_NATIVE_INFO g_Natives[] =
@@ -984,6 +1275,7 @@ AMX_NATIVE_INFO g_Natives[] =
     { "ezhttp_get_data",                    ezhttp_get_data },
     { "ezhttp_parse_json_response",         ezhttp_parse_json_response },
     { "ezhttp_get_url",                     ezhttp_get_url },
+    { "ezhttp_download_url",                ezhttp_download_url },
     { "ezhttp_save_data_to_file",           ezhttp_save_data_to_file },
     { "ezhttp_save_data_to_file2",          ezhttp_save_data_to_file2 },
     { "ezhttp_get_headers_count",           ezhttp_get_headers_count },
@@ -1010,17 +1302,24 @@ AMX_NATIVE_INFO g_Natives[] =
     { "ezhttp_create_queue",                ezhttp_create_queue },
 
     // special
-    { "_ezhttp_steam_to_steam64",           ezhttp_steam_to_steam64 },
+    { "ezhttp_steam_to_steam64",            ezhttp_steam_to_steam64 },
     { nullptr,                              nullptr },
 };
 
+cvar_t cvar_ezhttp_version = { "ezhttp_version", MODULE_VERSION, FCVAR_SERVER | FCVAR_SPONLY };
 
 void OnAmxxAttach()
 {
-    MF_AddNatives(g_Natives);
-    MF_AddNatives(g_JsonNatives);
+    try {
+        MF_AddNatives(g_Natives);
+        MF_AddNatives(g_JsonNatives);
 
-    CreateModules();
+        CreateModules();
+
+        CVAR_REGISTER(&cvar_ezhttp_version);
+    } catch (const std::exception& e) {
+        MF_LogError(nullptr, AMX_ERR_NATIVE, "ezhttp: Fatal exception during attach: %s", e.what());
+    }
 }
 
 void OnAmxxDetach()
@@ -1030,8 +1329,22 @@ void OnAmxxDetach()
 
 void StartFrame()
 {
-    if (g_EasyHttpModule)
-        g_EasyHttpModule->RunFrame();
+    try {
+        if (g_EasyHttpModule)
+            g_EasyHttpModule->RunFrame();
+    } catch (const std::exception& e) {
+        static bool error_logged = false;
+        if (!error_logged) {
+            MF_LogError(nullptr, AMX_ERR_NATIVE, "ezhttp: Exception during StartFrame: %s", e.what());
+            error_logged = true;
+        }
+    } catch (...) {
+        static bool error_logged = false;
+        if (!error_logged) {
+            MF_LogError(nullptr, AMX_ERR_NATIVE, "ezhttp: Unknown exception during StartFrame");
+            error_logged = true;
+        }
+    }
 
     SET_META_RESULT(MRES_IGNORED);
 }

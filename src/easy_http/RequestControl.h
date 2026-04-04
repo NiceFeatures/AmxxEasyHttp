@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 namespace ezhttp
 {
     struct RequestControl
@@ -14,8 +16,9 @@ namespace ezhttp
             int32_t upload_now;
         };
 
-        bool completed{};
-        bool forgotten{};
+        std::atomic<bool> completed{false};
+        std::atomic<bool> forgotten{false};
+        // canceled is protected by control_mutex for compound operations
         bool canceled{};
         Progress progress{};
     };

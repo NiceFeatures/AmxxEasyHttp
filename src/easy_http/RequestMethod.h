@@ -9,6 +9,7 @@ namespace ezhttp
         HttpPut,
         HttpPatch,
         HttpDelete,
+        HttpDownload,
         FtpUpload,
         FtpDownload,
     };

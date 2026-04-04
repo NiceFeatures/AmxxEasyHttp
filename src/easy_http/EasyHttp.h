@@ -42,5 +42,6 @@ namespace ezhttp
         cpr::Response SendHttpRequest(cpr::Session& session, const std::shared_ptr<RequestControl>& request_control, RequestMethod method, const cpr::Url& url, const RequestOptions& options);
         cpr::Response FtpUpload(cpr::Session& session, const std::shared_ptr<RequestControl>& request_control, const cpr::Url& url, const RequestOptions& options);
         cpr::Response FtpDownload(cpr::Session& session, const std::shared_ptr<RequestControl>& request_control, const cpr::Url& url, const RequestOptions& options);
+        cpr::Response HttpDownload(cpr::Session& session, const std::shared_ptr<RequestControl>& request_control, const cpr::Url& url, const RequestOptions& options);
     };
 }

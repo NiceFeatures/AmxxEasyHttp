@@ -19,7 +19,9 @@ namespace ezhttp
         if (rc != CURLUE_OK)
             return "";
 
-        return { host };
+        std::string result(host);
+        curl_free(host);
+        return result;
     }
 
     void UrlUtils::InitializeIfNeeded()
@@ -28,5 +30,14 @@ namespace ezhttp
             return;
 
         curl_url_ = curl_url();
+    }
+
+    void UrlUtils::Cleanup()
+    {
+        if (curl_url_ != nullptr)
+        {
+            curl_url_cleanup(curl_url_);
+            curl_url_ = nullptr;
+        }
     }
 }

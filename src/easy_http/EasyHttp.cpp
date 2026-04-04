@@ -25,11 +25,24 @@ std::shared_ptr<RequestControl> EasyHttp::SendRequest(RequestMethod method, cons
     {
         Response ezhttp_response;
 
-        // Used scope to ensure that cpr::Response is destroyed before exiting the function.
-        // For some reason, if this is not done, double free (?) for std::shared_ptr<CurlHolder> occurs occasionally.
+        try
         {
-            cpr::Response cpr_response = SendRequest(request_control, method, url, options);
-            ezhttp_response = Response(cpr_response);
+            // Used scope to ensure that cpr::Response is destroyed before exiting the function.
+            // For some reason, if this is not done, double free (?) for std::shared_ptr<CurlHolder> occurs occasionally.
+            {
+                cpr::Response cpr_response = SendRequest(request_control, method, url, options);
+                ezhttp_response = Response(cpr_response);
+            }
+        }
+        catch (const std::exception& e)
+        {
+            ezhttp_response.error.code = cpr::ErrorCode::INTERNAL_ERROR;
+            ezhttp_response.error.message = std::string("Internal exception: ") + e.what();
+        }
+        catch (...)
+        {
+            ezhttp_response.error.code = cpr::ErrorCode::INTERNAL_ERROR;
+            ezhttp_response.error.message = "Unknown internal exception during request";
         }
 
         return ezhttp_response;
@@ -63,8 +76,13 @@ void EasyHttp::RunFrame()
 {
     for (int i = 0; i < kMaxTasksExecPerFrame; i++)
     {
-        if (!update_scheduler_->try_run_one_task())
-            break;
+        try {
+            if (!update_scheduler_->try_run_one_task())
+                break;
+        } catch (...) {
+            // Exceptions here are likely from continuations or scheduler internals.
+            // They will be handled/logged if possible in the outer StartFrame loop.
+        }
     }
 
     // erase completed tasks
@@ -120,6 +138,8 @@ void EasyHttp::SetSessionCommonOptions(cpr::Session& session, const std::shared_
 
     if (options.timeout)
         session.SetTimeout(*options.timeout);
+    else
+        session.SetTimeout(cpr::Timeout{ 30000 });
 
     if (options.connect_timeout)
         session.SetConnectTimeout(*options.connect_timeout);
@@ -139,6 +159,10 @@ cpr::Response EasyHttp::SendRequest(const std::shared_ptr<RequestControl>& reque
 
         case RequestMethod::FtpDownload:
             response = FtpDownload(*session, request_control, url, options);
+            break;
+
+        case RequestMethod::HttpDownload:
+            response = HttpDownload(*session, request_control, url, options);
             break;
 
         default:
@@ -243,7 +267,12 @@ cpr::Response EasyHttp::FtpUpload(cpr::Session& session, const std::shared_ptr<R
     if (options.require_secure)
     {
         curl_easy_setopt(curl, CURLOPT_USE_SSL, CURLUSESSL_ALL);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+#ifdef LINUX
+        if (!ca_cert_path_.empty())
+            curl_easy_setopt(curl, CURLOPT_CAINFO, ca_cert_path_.c_str());
+#endif
     }
     CURLcode curl_result = curl_easy_perform(curl);
 
@@ -257,6 +286,52 @@ cpr::Response EasyHttp::FtpUpload(cpr::Session& session, const std::shared_ptr<R
 
         resp.error.code = cpr::ErrorCode::REQUEST_CANCELLED;
         resp.error.message = "Ftp uploading canceled. Code " + std::to_string(response_code);
+    }
+
+    return resp;
+}
+
+cpr::Response EasyHttp::HttpDownload(cpr::Session& session, const std::shared_ptr<RequestControl>& request_control, const cpr::Url& url, const RequestOptions& options)
+{
+    if (!options.file_path)
+        return session.Complete(CURLE_READ_ERROR);
+
+    std::ofstream file(*options.file_path, std::ofstream::out | std::ofstream::binary);
+    if (!file.is_open())
+        return session.Complete(CURLE_READ_ERROR);
+
+    if (options.user_agent)
+        session.SetUserAgent(*options.user_agent);
+
+    if (options.url_parameters)
+        session.SetParameters(*options.url_parameters);
+
+    if (options.header)
+        session.SetHeader(*options.header);
+
+    if (options.cookies)
+        session.SetCookies(*options.cookies);
+
+    if (options.auth)
+        session.SetAuth(*options.auth);
+
+    session.SetWriteCallback(cpr::WriteCallback([&file, request_control](std::string data, intptr_t userdata) {
+        if (request_control->canceled)
+            return false;
+        file.write(data.c_str(), data.size());
+        return true;
+    }));
+
+    cpr::Response resp = session.Get();
+
+    file.close();
+
+    if (request_control->canceled)
+    {
+        std::filesystem::remove(*options.file_path);
+
+        resp.error.code = cpr::ErrorCode::REQUEST_CANCELLED;
+        resp.error.message = "Http downloading canceled";
     }
 
     return resp;
@@ -282,7 +357,12 @@ cpr::Response EasyHttp::FtpDownload(cpr::Session& session, const std::shared_ptr
     if (options.require_secure)
     {
         curl_easy_setopt(curl, CURLOPT_USE_SSL, CURLUSESSL_ALL);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+#ifdef LINUX
+        if (!ca_cert_path_.empty())
+            curl_easy_setopt(curl, CURLOPT_CAINFO, ca_cert_path_.c_str());
+#endif
     }
     CURLcode curl_result = curl_easy_perform(curl);
 
