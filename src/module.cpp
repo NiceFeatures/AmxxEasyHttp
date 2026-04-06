@@ -1403,10 +1403,8 @@ void StartFrame()
 void ServerDeactivate()
 {
     if (g_EasyHttpModule) {
-        // Cancel all pending requests so callbacks don't fire into unloaded AMX plugins
-        g_EasyHttpModule->CancelAllRequests();
-
-        // Drain callbacks from already-completed requests
+        // Drain callbacks from already-completed requests so they don't
+        // fire into unloaded AMX plugins during map change
         for (int i = 0; i < 20; i++) {
             try {
                 g_EasyHttpModule->RunFrame();
