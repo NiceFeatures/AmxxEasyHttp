@@ -28,7 +28,8 @@ std::shared_ptr<RequestControl> EasyHttp::SendRequest(RequestMethod method, cons
         try
         {
             // Used scope to ensure that cpr::Response is destroyed before exiting the function.
-            // For some reason, if this is not done, double free (?) for std::shared_ptr<CurlHolder> occurs occasionally.
+            // Without this, a double-free for std::shared_ptr<CurlHolder> occasionally occurs
+            // (likely a cpr library issue with CurlHolder reuse in session cache).
             {
                 cpr::Response cpr_response = SendRequest(request_control, method, url, options);
                 ezhttp_response = Response(cpr_response);

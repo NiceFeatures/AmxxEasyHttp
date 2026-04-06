@@ -15,7 +15,7 @@
  *   to add multiple entries.
  */
 #define MODULE_NAME "Amxx Easy Http"
-#define MODULE_VERSION "2.0.0"
+#define MODULE_VERSION "2.1.0"
 #define MODULE_AUTHOR "Polarhigh & iceeedR"
 #define MODULE_URL "https://github.com/NiceFeatures/AmxxEasyHttp"
 #define MODULE_LOGTAG "EZ_HTTP"

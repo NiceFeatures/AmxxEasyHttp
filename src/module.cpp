@@ -4,6 +4,8 @@
 #include <filesystem>
 #include <system_error>
 #include <memory>
+#include <cstdlib>
+#include <cerrno>
 
 
 #include <sdk/amxxmodule.h>
@@ -276,18 +278,32 @@ cell AMX_NATIVE_CALL ezhttp_option_set_auth(AMX* amx, cell* params)
 // native ezhttp_option_set_user_data(EzHttpOptions:options_id, const data[], len);
 cell AMX_NATIVE_CALL ezhttp_option_set_user_data(AMX* amx, cell* params)
 {
-    auto options_id = (OptionsId)params[1];
-    cell* data_addr = MF_GetAmxAddr(amx, params[2]);
-    int data_len = params[3];
+    try {
+        auto options_id = (OptionsId)params[1];
+        cell* data_addr = MF_GetAmxAddr(amx, params[2]);
+        int data_len = params[3];
 
-    if (!ValidateOptionsId(amx, options_id))
+        if (!ValidateOptionsId(amx, options_id))
+            return 0;
+
+        if (!data_addr) {
+            MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_option_set_user_data: data pointer is null");
+            return 0;
+        }
+
+        if (data_len > 2500000) {
+            throw std::runtime_error("ezhttp: data_len exceeds safety limit (10MB)");
+        }
+
+        auto user_data = std::make_shared<std::vector<cell>>(data_len);
+        MF_CopyAmxMemory(user_data->data(), data_addr, data_len);
+
+        g_EasyHttpModule->GetOptions(options_id).user_data = user_data;
         return 0;
-
-    auto user_data = std::make_shared<std::vector<cell>>(data_len);
-    MF_CopyAmxMemory(user_data->data(), data_addr, data_len);
-
-    g_EasyHttpModule->GetOptions(options_id).user_data = user_data;
-    return 0;
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_option_set_user_data: %s", e.what());
+        return 0;
+    }
 }
 
 
@@ -447,7 +463,7 @@ cell AMX_NATIVE_CALL ezhttp_is_request_exists(AMX* amx, cell* params)
     return g_EasyHttpModule->IsRequestExists(request_id);
 }
 
-// native JSON:ezhttp_get_json(EzHttpRequest:request_id);
+// native ezhttp_cancel_request(EzHttpRequest:request_id);
 cell AMX_NATIVE_CALL ezhttp_cancel_request(AMX* amx, cell* params)
 {
     auto request_id = (RequestId)params[1];
@@ -930,45 +946,50 @@ cell AMX_NATIVE_CALL ezhttp_ftp_upload(AMX* amx, cell* params)
 
 cell AMX_NATIVE_CALL ezhttp_ftp_upload2(AMX* amx, cell* params)
 {
-    int arg_num = params[0] / sizeof(cell);
-    int url_str_len;
-    char* url_str = MF_GetAmxString(amx, params[1], 0, &url_str_len);
+    try {
+        int arg_num = params[0] / sizeof(cell);
+        int url_str_len;
+        char* url_str = MF_GetAmxString(amx, params[1], 0, &url_str_len);
 
-    int local_file_len;
-    char* local_file = MF_GetAmxString(amx, params[2], 1, &local_file_len);
+        int local_file_len;
+        char* local_file = MF_GetAmxString(amx, params[2], 1, &local_file_len);
 
-    int callback_len = 0;
-    char* callback = nullptr;
-    if (arg_num >= 3) {
-        callback = MF_GetAmxString(amx, params[3], 2, &callback_len);
-    }
+        int callback_len = 0;
+        char* callback = nullptr;
+        if (arg_num >= 3) {
+            callback = MF_GetAmxString(amx, params[3], 2, &callback_len);
+        }
 
-    bool secure = false;
-    if (arg_num >= 4) {
-        secure = (bool)params[4];
-    }
+        bool secure = false;
+        if (arg_num >= 4) {
+            secure = (bool)params[4];
+        }
 
-    auto options_id = OptionsId::Null;
-    if (arg_num >= 5) {
-        options_id = (OptionsId)params[5];
-    }
+        auto options_id = OptionsId::Null;
+        if (arg_num >= 5) {
+            options_id = (OptionsId)params[5];
+        }
 
-    if (options_id == OptionsId::Null)
-        options_id = g_EasyHttpModule->CreateOptions();
-    else if (!ValidateOptionsId(amx, options_id))
+        if (options_id == OptionsId::Null)
+            options_id = g_EasyHttpModule->CreateOptions();
+        else if (!ValidateOptionsId(amx, options_id))
+            return 0;
+
+        std::string resolved_path;
+        if (!ValidatePath("ezhttp_ftp_upload2", local_file, resolved_path))
+            return 0;
+
+        auto& builder = g_EasyHttpModule->GetOptionsBuilder(options_id);
+        builder.SetFilePath(resolved_path);
+        builder.SetSecure(secure);
+
+        SendRequest(amx, RequestMethod::FtpUpload, options_id, std::string(url_str, url_str_len), (callback) ? std::string(callback, callback_len) : "");
+
         return 0;
-
-    std::string resolved_path;
-    if (!ValidatePath("ezhttp_ftp_upload2", local_file, resolved_path))
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_ftp_upload2: %s", e.what());
         return 0;
-
-    auto& builder = g_EasyHttpModule->GetOptionsBuilder(options_id);
-    builder.SetFilePath(resolved_path);
-    builder.SetSecure(secure);
-
-    SendRequest(amx, RequestMethod::FtpUpload, options_id, std::string(url_str, url_str_len), (callback) ? std::string(callback, callback_len) : "");
-
-    return 0;
+    }
 }
 
 cell AMX_NATIVE_CALL ezhttp_ftp_download(AMX* amx, cell* params)
@@ -1033,45 +1054,50 @@ cell AMX_NATIVE_CALL ezhttp_ftp_download(AMX* amx, cell* params)
 
 cell AMX_NATIVE_CALL ezhttp_ftp_download2(AMX* amx, cell* params)
 {
-    int arg_num = params[0] / sizeof(cell);
-    int url_str_len;
-    char* url_str = MF_GetAmxString(amx, params[1], 0, &url_str_len);
+    try {
+        int arg_num = params[0] / sizeof(cell);
+        int url_str_len;
+        char* url_str = MF_GetAmxString(amx, params[1], 0, &url_str_len);
 
-    int local_file_len;
-    char* local_file = MF_GetAmxString(amx, params[2], 1, &local_file_len);
+        int local_file_len;
+        char* local_file = MF_GetAmxString(amx, params[2], 1, &local_file_len);
 
-    int callback_len = 0;
-    char* callback = nullptr;
-    if (arg_num >= 3) {
-        callback = MF_GetAmxString(amx, params[3], 2, &callback_len);
-    }
+        int callback_len = 0;
+        char* callback = nullptr;
+        if (arg_num >= 3) {
+            callback = MF_GetAmxString(amx, params[3], 2, &callback_len);
+        }
 
-    bool secure = false;
-    if (arg_num >= 4) {
-        secure = (bool)params[4];
-    }
+        bool secure = false;
+        if (arg_num >= 4) {
+            secure = (bool)params[4];
+        }
 
-    auto options_id = OptionsId::Null;
-    if (arg_num >= 5) {
-        options_id = (OptionsId)params[5];
-    }
+        auto options_id = OptionsId::Null;
+        if (arg_num >= 5) {
+            options_id = (OptionsId)params[5];
+        }
 
-    if (options_id == OptionsId::Null)
-        options_id = g_EasyHttpModule->CreateOptions();
-    else if (!ValidateOptionsId(amx, options_id))
+        if (options_id == OptionsId::Null)
+            options_id = g_EasyHttpModule->CreateOptions();
+        else if (!ValidateOptionsId(amx, options_id))
+            return 0;
+
+        std::string resolved_path;
+        if (!ValidatePath("ezhttp_ftp_download2", local_file, resolved_path))
+            return 0;
+
+        auto& builder = g_EasyHttpModule->GetOptionsBuilder(options_id);
+        builder.SetFilePath(resolved_path);
+        builder.SetSecure(secure);
+
+        SendRequest(amx, RequestMethod::FtpDownload, options_id, std::string(url_str, url_str_len), (callback) ? std::string(callback, callback_len) : "");
+
         return 0;
-
-    std::string resolved_path;
-    if (!ValidatePath("ezhttp_ftp_download2", local_file, resolved_path))
+    } catch (const std::exception& e) {
+        MF_LogError(amx, AMX_ERR_NATIVE, "ezhttp_ftp_download2: %s", e.what());
         return 0;
-
-    auto& builder = g_EasyHttpModule->GetOptionsBuilder(options_id);
-    builder.SetFilePath(resolved_path);
-    builder.SetSecure(secure);
-
-    SendRequest(amx, RequestMethod::FtpDownload, options_id, std::string(url_str, url_str_len), (callback) ? std::string(callback, callback_len) : "");
-
-    return 0;
+    }
 }
 
 cell AMX_NATIVE_CALL ezhttp_create_queue(AMX* amx, cell* params)
@@ -1098,8 +1124,23 @@ cell AMX_NATIVE_CALL ezhttp_steam_to_steam64(AMX* amx, cell* params)
     if (tokens.size() != 3)
         return 0;
 
-    uint32_t account_id = std::atoi(tokens[2].c_str());    // 32 bit
-    account_id = account_id << 1 | std::atoi(tokens[1].c_str());
+    // Validate Y bit (universe bit) must be 0 or 1
+    if (tokens[1] != "0" && tokens[1] != "1")
+        return 0;
+
+    char* endptr = nullptr;
+    errno = 0;
+    long y_bit = std::strtol(tokens[1].c_str(), &endptr, 10);
+    if (errno != 0 || *endptr != '\0')
+        return 0;
+
+    errno = 0;
+    long account_id_value = std::strtol(tokens[2].c_str(), &endptr, 10);
+    if (errno != 0 || *endptr != '\0' || account_id_value < 0)
+        return 0;
+
+    uint32_t account_id = static_cast<uint32_t>(account_id_value); // 32 bit
+    account_id = account_id << 1 | static_cast<uint32_t>(y_bit);
     uint32_t account_instance = 1;                         // 20 bit, 1 for individual account
     uint8_t account_type = 1;                              // 4 bit,  1 is individual account
     uint8_t universe = 1;                                  // 8 bit, using token[0] produces incorrect results, so use always 1
@@ -1361,8 +1402,21 @@ void StartFrame()
 
 void ServerDeactivate()
 {
-    if (g_EasyHttpModule)
+    if (g_EasyHttpModule) {
+        // Cancel all pending requests so callbacks don't fire into unloaded AMX plugins
+        g_EasyHttpModule->CancelAllRequests();
+
+        // Drain callbacks from already-completed requests
+        for (int i = 0; i < 20; i++) {
+            try {
+                g_EasyHttpModule->RunFrame();
+            } catch (...) {
+                break;
+            }
+        }
+
         g_EasyHttpModule->ServerDeactivate();
+    }
 
     if (g_JsonManager)
         g_JsonManager->FreeAllHandles();

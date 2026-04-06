@@ -90,14 +90,14 @@ enum EzJSON
 /**
  * Helper macros for checking type
  */
-#define ezjson_is_object(%1)   (%1 != EzInvalid_JSON && ezjson_get_type(%1) == EzJSONObject)
-#define ezjson_is_array(%1)    (%1 != EzInvalid_JSON && ezjson_get_type(%1) == EzJSONArray)
-#define ezjson_is_string(%1)   (%1 != EzInvalid_JSON && ezjson_get_type(%1) == EzJSONString)
-#define ezjson_is_number(%1)   (%1 != EzInvalid_JSON && ezjson_get_type(%1) == EzJSONNumber)
-#define ezjson_is_bool(%1)     (%1 != EzInvalid_JSON && ezjson_get_type(%1) == EzJSONBoolean)
-#define ezjson_is_null(%1)     (%1 != EzInvalid_JSON && ezjson_get_type(%1) == EzJSONNull)
-#define ezjson_is_true(%1)     (%1 != EzInvalid_JSON && ezjson_is_bool(%1) && ezjson_get_bool(%1))
-#define ezjson_is_false(%1)    (%1 != EzInvalid_JSON && ezjson_is_bool(%1) && !ezjson_get_bool(%1))
+#define ezjson_is_object(%1)   ((%1) != EzInvalid_JSON && ezjson_get_type(%1) == EzJSONObject)
+#define ezjson_is_array(%1)    ((%1) != EzInvalid_JSON && ezjson_get_type(%1) == EzJSONArray)
+#define ezjson_is_string(%1)   ((%1) != EzInvalid_JSON && ezjson_get_type(%1) == EzJSONString)
+#define ezjson_is_number(%1)   ((%1) != EzInvalid_JSON && ezjson_get_type(%1) == EzJSONNumber)
+#define ezjson_is_bool(%1)     ((%1) != EzInvalid_JSON && ezjson_get_type(%1) == EzJSONBoolean)
+#define ezjson_is_null(%1)     ((%1) != EzInvalid_JSON && ezjson_get_type(%1) == EzJSONNull)
+#define ezjson_is_true(%1)     ((%1) != EzInvalid_JSON && ezjson_is_bool(%1) && ezjson_get_bool(%1))
+#define ezjson_is_false(%1)    ((%1) != EzInvalid_JSON && ezjson_is_bool(%1) && !ezjson_get_bool(%1))
 
 
 /**
