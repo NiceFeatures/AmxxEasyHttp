@@ -4,7 +4,6 @@
 #include "easy_http/EasyHttpOptionsBuilder.h"
 #include "utils/ContainerWithHandles.h"
 #include "sdk/amxxmodule.h"
-#include <async++.h>
 #include <vector>
 #include <memory>
 #include <optional>
@@ -99,6 +98,7 @@ public:
 
     QueueId CreateQueue();
     [[nodiscard]] bool IsQueueExists(QueueId handle) const { return easy_http_pack_.contains(handle); }
+    [[nodiscard]] int GetActiveRequestCount();
 
 private:
     void ResetMainAndRemoveUsersQueues();

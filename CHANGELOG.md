@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.1] - 2026-04-13
+
+### Added
+- **FTP Wildcard Support**: Added support for wildcard downloads in FTP (e.g., `ftp://server/*.txt`) using CURL chunk callbacks.
+- **New Native**: `ezhttp_get_active_requests_count()` to monitor the number of active requests across all queues.
+- **New Native**: `ezhttp_get_redirect_count()` to retrieve the number of HTTP redirects.
+
+### Changed
+- **Architectural Overhaul**: Replaced `asyncplusplus` dependency with a custom, lightweight worker-thread pool based on `std::thread`. This reduces binary size and improves compatibility with older GLIBC versions.
+- **Thread Safety**: Improved internal state management using `std::atomic` in `RequestControl`, eliminating potential race conditions in progress tracking and cancellation.
+
+### Fixed
+- **Security**: Added strict filename sanitization for FTP wildcard downloads to prevent directory traversal via malicious or misconfigured FTP servers.
+- **Security**: Reinforced `ValidatePath` checks across all file-writing operations.
+
 ## [2.1.1] - 2026-04-12
 
 ### Fixed

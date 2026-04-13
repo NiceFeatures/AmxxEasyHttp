@@ -612,6 +612,13 @@ native ezhttp_get_downloaded_bytes(EzHttpRequest:request_id);
 native ezhttp_get_user_data(EzHttpRequest:request_id, data[]);
 
 /**
+ * Returns the number of active requests across all queues.
+ *
+ * @return                  The number of active requests.
+ */
+native ezhttp_get_active_requests_count();
+
+/**
  * Uploads a file to a remote server using FTP.
  *
  * @param user               The user name to use for the FTP connection.

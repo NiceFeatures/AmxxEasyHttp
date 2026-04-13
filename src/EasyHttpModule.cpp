@@ -163,3 +163,20 @@ QueueId EasyHttpModule::CreateQueue()
 {
     return easy_http_pack_.Add(EasyHttpPack{});
 }
+
+int EasyHttpModule::GetActiveRequestCount()
+{
+    int count = 0;
+    for (auto& pack_kv : easy_http_pack_)
+    {
+        if (pack_kv.second.terminating_easy_http)
+            count += pack_kv.second.terminating_easy_http->GetActiveRequestCount();
+        if (pack_kv.second.forgettable_easy_http)
+            count += pack_kv.second.forgettable_easy_http->GetActiveRequestCount();
+    }
+    for (auto& forgotten : forgotten_easy_http_)
+    {
+        count += forgotten->GetActiveRequestCount();
+    }
+    return count;
+}

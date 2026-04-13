@@ -1,11 +1,12 @@
 #pragma once
+#include <filesystem>
 #include <string>
 
 namespace utils
 {
-    /// Percent-encodes characters that have special meaning in URLs (RFC 3986).
-    /// Used for FTP credentials (user/password) to avoid corrupting the URL.
-    std::string PercentEncode(const std::string& input);
-
-    std::string ConstructFtpUrl(const std::string& user, const std::string& password, const std::string& host, const std::string& remote_file);
+    std::string ConstructFtpUrl(const std::string &user, const std::string &password, const std::string &host, const std::string &remote_file);
+    std::string NormalizeFtpUrl(const std::string &url);
+    bool HasWildcardPath(const std::string &url);
+    std::string GetRemoteFileName(const std::string &url);
+    std::filesystem::path BuildDownloadPath(const std::string &local_target, const std::string &remote_file_name, bool force_directory = false);
 }

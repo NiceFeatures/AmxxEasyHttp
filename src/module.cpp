@@ -473,8 +473,7 @@ cell AMX_NATIVE_CALL ezhttp_cancel_request(AMX* amx, cell* params)
 
     RequestData& request_data = g_EasyHttpModule->GetRequest(request_id);
 
-    std::lock_guard<std::mutex> lock_guard(request_data.request_control->control_mutex);
-    request_data.request_control->canceled = true;
+    request_data.request_control->canceled.store(true);
 
     return 0;
 }
@@ -488,13 +487,13 @@ cell AMX_NATIVE_CALL ezhttp_request_progress(AMX* amx, cell* params)
         return 0;
 
     auto& request_control = g_EasyHttpModule->GetRequest(request_id).request_control;
-    std::lock_guard<std::mutex> lock_guard(request_control->control_mutex);
+    auto progress = request_control->GetProgress();
 
     cell* p = MF_GetAmxAddr(amx, params[2]);
-    p[0] = request_control->progress.download_now;
-    p[1] = request_control->progress.download_total;
-    p[2] = request_control->progress.upload_now;
-    p[3] = request_control->progress.upload_total;
+    p[0] = progress.download_now;
+    p[1] = progress.download_total;
+    p[2] = progress.upload_now;
+    p[3] = progress.upload_total;
 
     return 0;
 }
@@ -1105,6 +1104,11 @@ cell AMX_NATIVE_CALL ezhttp_create_queue(AMX* amx, cell* params)
     return (cell)g_EasyHttpModule->CreateQueue();
 }
 
+cell AMX_NATIVE_CALL ezhttp_get_active_requests_count(AMX* amx, cell* params)
+{
+    return (cell)g_EasyHttpModule->GetActiveRequestCount();
+}
+
 cell AMX_NATIVE_CALL ezhttp_steam_to_steam64(AMX* amx, cell* params)
 {
     // doc https://developer.valvesoftware.com/wiki/SteamID
@@ -1351,6 +1355,9 @@ AMX_NATIVE_INFO g_Natives[] =
 
     // queue
     { "ezhttp_create_queue",                ezhttp_create_queue },
+
+    // info
+    { "ezhttp_get_active_requests_count",   ezhttp_get_active_requests_count },
 
     // special
     { "ezhttp_steam_to_steam64",            ezhttp_steam_to_steam64 },
