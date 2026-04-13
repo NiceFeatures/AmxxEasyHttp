@@ -21,7 +21,7 @@ jobs:
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
             -e DEBIAN_FRONTEND=noninteractive \
-            ubuntu:18.04 \
+            ubuntu:14.04 \
             bash -c "
               apt-get update && apt-get install -y software-properties-common git build-essential pkg-config python3-pip wget ca-certificates &&
               add-apt-repository ppa:ubuntu-toolchain-r/test -y &&
