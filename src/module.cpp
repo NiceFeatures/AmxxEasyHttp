@@ -7,6 +7,14 @@
 #include <cstdlib>
 #include <cerrno>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 #include <sdk/amxxmodule.h>
 
@@ -1366,9 +1374,84 @@ AMX_NATIVE_INFO g_Natives[] =
 
 cvar_t cvar_ezhttp_version = { "ezhttp_version", MODULE_VERSION, FCVAR_SERVER | FCVAR_SPONLY };
 
+void HandleAutoUpdate()
+{
+    std::error_code ec;
+
+#ifdef _WIN32
+    std::filesystem::path modulePath = std::filesystem::weakly_canonical(MF_BuildPathname("modules/easy_http_amxx.dll"), ec);
+#else
+    std::filesystem::path modulePath = std::filesystem::weakly_canonical(MF_BuildPathname("modules/easy_http_amxx_i386.so"), ec);
+#endif
+
+    if (ec) {
+        MF_PrintSrvConsole("[AmxxEasyHttp] AutoUpdater: Failed to resolve module path. Error: %s\n", ec.message().c_str());
+        return;
+    }
+
+    std::filesystem::path newPath = modulePath.string() + ".new";
+    std::filesystem::path oldPath = modulePath.string() + ".old";
+
+    bool swapOccurred = false;
+
+    if (std::filesystem::exists(newPath, ec)) {
+        
+        // --- 1. DRY RUN NATIVE LOAD TEST ---
+        // Dynamically load the .new file to verify it is absolutely healthy before overwriting anything.
+#ifdef _WIN32
+        HMODULE testLoad = LoadLibraryA(newPath.string().c_str());
+        if (!testLoad) {
+            MF_PrintSrvConsole("[AmxxEasyHttp] AutoUpdater: CRITICAL - Downloaded .new DLL is CORRUPT or missing dependencies! Aborting swap.\n");
+            std::filesystem::remove(newPath, ec);
+            return;
+        }
+        FreeLibrary(testLoad);
+#else
+        void* testLoad = dlopen(newPath.string().c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (!testLoad) {
+            MF_PrintSrvConsole("[AmxxEasyHttp] AutoUpdater: CRITICAL - Downloaded .new SO is CORRUPT or missing dependencies! %s\n", dlerror());
+            std::filesystem::remove(newPath, ec);
+            return;
+        }
+        dlclose(testLoad);
+#endif
+
+        // --- 2. THE SWAP ---
+        if (std::filesystem::exists(oldPath, ec)) {
+            std::filesystem::remove(oldPath, ec);
+        }
+
+        std::filesystem::rename(modulePath, oldPath, ec);
+        if (!ec) {
+            std::filesystem::rename(newPath, modulePath, ec);
+            if (!ec) {
+                swapOccurred = true;
+                MF_PrintSrvConsole("[AmxxEasyHttp] AutoUpdater: UPDATE SUCCESSFUL! Module swapped. Triggering reboot safely...\n");
+            } else {
+                std::error_code recover_ec;
+                std::filesystem::rename(oldPath, modulePath, recover_ec);
+                MF_PrintSrvConsole("[AmxxEasyHttp] AutoUpdater: Error renaming .new to .dll/.so. Recovery attempted.\n");
+            }
+        } else {
+            MF_PrintSrvConsole("[AmxxEasyHttp] AutoUpdater: Error renaming current module to .old: %s\n", ec.message().c_str());
+        }
+    } else {
+        if (std::filesystem::exists(oldPath, ec)) {
+            std::filesystem::remove(oldPath, ec);
+            MF_PrintSrvConsole("[AmxxEasyHttp] AutoUpdater: Old module version pruned successfully.\n");
+        }
+    }
+
+    if (swapOccurred) {
+        g_engfuncs.pfnServerCommand((char*)"quit\n");
+    }
+}
+
 void OnAmxxAttach()
 {
     try {
+        HandleAutoUpdate();
+        
         MF_AddNatives(g_Natives);
         MF_AddNatives(g_JsonNatives);
 
