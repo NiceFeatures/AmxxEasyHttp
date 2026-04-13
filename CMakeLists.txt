@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(AmxxEasyHttp
-        VERSION        2.0.0
+        VERSION        2.1.1
         DESCRIPTION    "HTTP, HTTPS and FTP for AMXX plugins"
         HOMEPAGE_URL   "https://github.com/NiceFeatures/AmxxEasyHttp"
         LANGUAGES      CXX
