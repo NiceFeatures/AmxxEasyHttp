@@ -21,11 +21,13 @@ jobs:
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
             -e DEBIAN_FRONTEND=noninteractive \
-            ubuntu:14.04 \
+            ubuntu:16.04 \
             bash -c "
-              apt-get update && apt-get install -y software-properties-common git build-essential pkg-config python3-pip wget ca-certificates &&
+              apt-get update && apt-get install -y software-properties-common wget ca-certificates &&
+              apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 1E9377A2BA9EF27F &&
               add-apt-repository ppa:ubuntu-toolchain-r/test -y &&
               apt-get update &&
+              apt-get install -y git build-essential pkg-config python3-pip &&
               wget https://github.com/Kitware/CMake/releases/download/v3.20.6/cmake-3.20.6-linux-x86_64.tar.gz &&
               tar -xzvf cmake-3.20.6-linux-x86_64.tar.gz &&
               cp -r cmake-3.20.6-linux-x86_64/bin/* /usr/local/bin &&
