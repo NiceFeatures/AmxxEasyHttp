@@ -3,65 +3,48 @@ name: Build and Release
 on:
   push:
     branches: [ "main" ]
-    tags: [ "v*" ]
+  tags: [ "v*" ]
   pull_request:
     branches: [ "main" ]
 
 jobs:
   build-linux:
     runs-on: ubuntu-latest
-    container:
-      image: ubuntu:18.04
-    env:
-      DEBIAN_FRONTEND: noninteractive
     steps:
-      - name: Install git and dependencies
-        run: |
-          apt-get update
-          apt-get install -y \
-            software-properties-common \
-            git \
-            build-essential \
-            pkg-config \
-            python3-pip \
-            wget \
-            ca-certificates
-          add-apt-repository ppa:ubuntu-toolchain-r/test -y
-          apt-get update
-          wget https://github.com/Kitware/CMake/releases/download/v3.20.6/cmake-3.20.6-linux-x86_64.tar.gz
-          tar -xzvf cmake-3.20.6-linux-x86_64.tar.gz
-          cp -r cmake-3.20.6-linux-x86_64/bin/* /usr/local/bin
-          cp -r cmake-3.20.6-linux-x86_64/share/* /usr/local/share
-          dpkg --add-architecture i386
-          apt-get update
-          apt-get install -y \
-            gcc-9-multilib \
-            g++-9-multilib \
-            libcurl4-openssl-dev:i386 \
-            libssl-dev:i386 \
-            zlib1g-dev:i386
-
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Configure CMake
+      - name: Build Module in Docker
         run: |
-          mkdir build && cd build
-          cmake .. \
-            -DCMAKE_C_COMPILER=gcc-9 \
-            -DCMAKE_CXX_COMPILER=g++-9 \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-            -DAMXX_EASY_HTTP_BUILD_TESTS=OFF
-
-      - name: Build
-        run: |
-          cd build
-          make easy_http -j$(nproc)
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            -e DEBIAN_FRONTEND=noninteractive \
+            ubuntu:18.04 \
+            bash -c "
+              apt-get update && apt-get install -y software-properties-common git build-essential pkg-config python3-pip wget ca-certificates &&
+              add-apt-repository ppa:ubuntu-toolchain-r/test -y &&
+              apt-get update &&
+              wget https://github.com/Kitware/CMake/releases/download/v3.20.6/cmake-3.20.6-linux-x86_64.tar.gz &&
+              tar -xzvf cmake-3.20.6-linux-x86_64.tar.gz &&
+              cp -r cmake-3.20.6-linux-x86_64/bin/* /usr/local/bin &&
+              cp -r cmake-3.20.6-linux-x86_64/share/* /usr/local/share &&
+              dpkg --add-architecture i386 &&
+              apt-get update &&
+              apt-get install -y gcc-9-multilib g++-9-multilib libcurl4-openssl-dev:i386 libssl-dev:i386 zlib1g-dev:i386 &&
+              mkdir -p build && cd build &&
+              cmake .. \
+                -DCMAKE_C_COMPILER=gcc-9 \
+                -DCMAKE_CXX_COMPILER=g++-9 \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+                -DAMXX_EASY_HTTP_BUILD_TESTS=OFF &&
+              make easy_http -j\$(nproc)
+            "
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: easy_http_linux
           path: out/bin/Release/*.so
@@ -69,7 +52,7 @@ jobs:
   build-windows:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
@@ -85,7 +68,7 @@ jobs:
           cmake --build . --config Release --target easy_http
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: easy_http_windows
           path: out/bin/**/*.dll
@@ -97,10 +80,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
 
@@ -125,9 +108,10 @@ jobs:
           ls -lh release/
 
       - name: Publish Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           draft: false
           prerelease: false
           generate_release_notes: true
           files: release/*.zip
+
