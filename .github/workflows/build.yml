@@ -23,10 +23,15 @@ jobs:
             git \
             build-essential \
             pkg-config \
-            python3-pip
+            python3-pip \
+            wget \
+            ca-certificates
           add-apt-repository ppa:ubuntu-toolchain-r/test -y
           apt-get update
-          pip3 install cmake
+          wget https://github.com/Kitware/CMake/releases/download/v3.20.6/cmake-3.20.6-linux-x86_64.tar.gz
+          tar -xzvf cmake-3.20.6-linux-x86_64.tar.gz
+          cp -r cmake-3.20.6-linux-x86_64/bin/* /usr/local/bin
+          cp -r cmake-3.20.6-linux-x86_64/share/* /usr/local/share
           dpkg --add-architecture i386
           apt-get update
           apt-get install -y \
