@@ -353,6 +353,24 @@ Response EasyHttp::SendHttpRequest(cpr::Session &session, const std::shared_ptr<
     if (request_control->canceled.load())
         return CreateErrorResponse(url, cpr::ErrorCode::REQUEST_CANCELLED, "Request canceled before transfer");
 
+    std::ofstream file;
+    bool write_failed = false;
+    if (method == RequestMethod::HttpDownload)
+    {
+        if (!options.file_path)
+            return CreateErrorResponse(url, cpr::ErrorCode::INTERNAL_ERROR, "Local file path is required for HTTP download");
+        
+        file.open(*options.file_path, std::ofstream::out | std::ofstream::binary | std::ofstream::trunc);
+        if (!file.is_open())
+            return CreateErrorResponse(url, cpr::ErrorCode::INTERNAL_ERROR, "Failed to open local file for HTTP download");
+
+        session.SetWriteCallback(cpr::WriteCallback([&file, request_control, &write_failed](std::string data, intptr_t /*userdata*/) {
+            file.write(data.data(), static_cast<std::streamsize>(data.size()));
+            write_failed = !file.good();
+            return !request_control->canceled.load() && !write_failed;
+        }));
+    }
+
     Response response;
     switch (method)
     {
@@ -377,8 +395,19 @@ Response EasyHttp::SendHttpRequest(cpr::Session &session, const std::shared_ptr<
         break;
     }
 
+    if (file.is_open())
+        file.close();
+
     if (request_control->canceled.load())
+    {
+        if (method == RequestMethod::HttpDownload)
+            RemoveFileIfExists(*options.file_path);
         MarkCancelledResponse(response, "Request canceled");
+    }
+    else if (method == RequestMethod::HttpDownload && (write_failed || response.error.code != cpr::ErrorCode::OK))
+    {
+        RemoveFileIfExists(*options.file_path);
+    }
 
     return response;
 }

@@ -46,7 +46,15 @@ bool ValidatePath(const char* native_name, const char* file_path, std::string& r
             return false;
         }
 
-        std::filesystem::path target_path = std::filesystem::weakly_canonical(base_path / file_path, ec);
+        std::string normalized_path = file_path;
+        for (char& c : normalized_path)
+        {
+            if (c == '\\')
+            {
+                c = '/';
+            }
+        }
+        std::filesystem::path target_path = std::filesystem::weakly_canonical(base_path / normalized_path, ec);
         if (ec)
         {
             MF_Log("%s: Failed to resolve target path '%s': %s", native_name, file_path, ec.message().c_str());
